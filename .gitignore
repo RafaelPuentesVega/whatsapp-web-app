@@ -1,0 +1,32 @@
+# Node modules
+node_modules/
+
+# Logs
+*.log
+logs/
+
+# Directorios generados por whatsapp-web.js
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Archivos de configuración del entorno
+.env
+
+# Archivos de caché
+*.cache
+
+# Archivos generados por el sistema operativo
+.DS_Store
+Thumbs.db
+
+# Archivos de compilación
+dist/
+build/
+
+# Archivos temporales
+tmp/
+temp/
+
+# Dependencias de producción
+package-lock.json
+yarn.lock

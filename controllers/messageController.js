@@ -1,23 +1,73 @@
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
 
+const qrcode = require('qrcode');
+
+let qrCodeData = '';
 const client = new Client({
     authStrategy: new LocalAuth()
 });
-
 client.on('qr', (qr) => {
-    qrcode.generate(qr, { small: true });
+    // Guarda el código QR cuando lo recibes
+    qrCodeData = qr;
 });
 
 client.on('ready', () => {
-    console.log('WhatsApp Client is ready!');
+    console.log('Client is ready!');
 });
 
 client.initialize();
+const securityToken = process.env.SECURITY_TOKEN;
+
+const generateQr = async (req, res) => {
+    const providedToken = req.query.token; // Token pasado como parámetro en la URL
+
+    // Validar el token
+    if (!providedToken || providedToken !== securityToken) {
+        return res.status(403).send('Unauthorized: Invalid token');
+    }
+    if (qrCodeData) {
+        // Genera la imagen QR y la muestra en la página
+        qrcode.toDataURL(qrCodeData, (err, src) => {
+            if (err) res.send('Error occurred');
+            res.send(`<img src="${src}">`);
+        });
+    } else {
+        res.send('QR Code is not available yet, please refresh.');
+    }
+
+}
+
+
+// Función para borrar la carpeta de caché
+const clearCache = async (req, res) => {
+    const cacheAuthPath = path.resolve(__dirname, '../.wwebjs_auth');
+    const cachePath = path.resolve(__dirname, '../.wwebjs_cache');
+    const providedToken = req.query.token; // Token pasado como parámetro en la URL
+
+    // Validar el token
+    if (!providedToken || providedToken !== securityToken) {
+        return res.status(403).send('Unauthorized: Invalid token');
+    }
+
+    // Eliminar la carpeta de caché
+    fs.rm(cachePath, { recursive: true, force: true }, (err) => {
+        if (err) {
+            return res.status(500).send('Error deleting cache: ' + err.message);
+        } else {
+            fs.rm(cacheAuthPath, { recursive: true, force: true }, (err) => {
+                if (err) {
+                    return res.status(500).send('Error deleting auth cache: ' + err.message);
+                } else {
+                    return res.status(200).send('Cache deleted successfully.');
+                }
+            });
+        }
+    });
+};
 
 const downloadImage = async (url, filename) => {
     const response = await axios({
@@ -111,5 +161,7 @@ const sendMessage = async (req, res) => {
 };
 
 module.exports = {
-    sendMessage
+    sendMessage,
+    generateQr,
+    clearCache
 };

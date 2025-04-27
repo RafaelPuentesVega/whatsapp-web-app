@@ -323,7 +323,7 @@ const sendPDF = async (recipientId, pdfUrl, fileName, isGroup = false) => {
 const getGroups = async (req, res) => {
     console.log('Solicitando lista de grupos');
     try {
-        const providedToken = req.query.token;
+        const providedToken = req.query.token || req.headers.authorization?.split(' ')[1];
 
         if (!providedToken || providedToken !== process.env.SECURITY_TOKEN) {
             console.log('Intento de acceso no autorizado a la lista de grupos');
@@ -342,17 +342,78 @@ const getGroups = async (req, res) => {
         const groups = await sock.groupFetchAllParticipating();
         console.log(`Se encontraron ${Object.keys(groups).length} grupos`);
         
+        // Procesamos los grupos para extraer solo la información relevante
+        const simplifiedGroups = Object.entries(groups).map(([id, group]) => {
+            return {
+                id: id.split('@')[0], // Eliminar el @g.us
+                name: group.subject,
+                creationTime: group.creation, // Timestamp de creación
+                creationDate: new Date(group.creation * 1000).toISOString(), // Fecha en formato legible
+                participantsCount: group.participants?.length || 0
+            };
+        });
+        
+        // Ordenar por fecha de creación (de más reciente a más antiguo)
+        const sortedGroups = simplifiedGroups.sort((a, b) => b.creationTime - a.creationTime);
+        
         res.status(200).json({
             status: 'success',
             connection: connectionStatus,
             lastUpdate: lastConnectionUpdate,
-            groups: groups
+            count: sortedGroups.length,
+            groups: sortedGroups
         });
     } catch (error) {
         console.error(`Error al obtener grupos: ${error.message}`, error);
         res.status(500).json({
             status: 'error',
             message: 'Failed to fetch groups: ' + error.message
+        });
+    }
+};
+
+// Función para obtener una lista simplificada de grupos
+const getGroupsList = async (req, res) => {
+    console.log('Solicitando lista simplificada de grupos');
+    try {
+        const providedToken = req.query.token || req.headers.authorization?.split(' ')[1];
+
+        if (!providedToken || providedToken !== process.env.SECURITY_TOKEN) {
+            console.log('Intento de acceso no autorizado a la lista simplificada de grupos');
+            return res.status(403).send('Unauthorized: Invalid token');
+        }
+        
+        if (connectionStatus !== 'open') {
+            console.log('⚠️ Advertencia: Intentando obtener grupos sin conexión activa');
+            return res.status(500).json({
+                status: 'error',
+                message: `Not connected. Current status: ${connectionStatus}`
+            });
+        }
+        
+        console.log('Obteniendo lista de grupos...');
+        const groups = await sock.groupFetchAllParticipating();
+        console.log(`Se encontraron ${Object.keys(groups).length} grupos`);
+        
+        // Procesamos los grupos para extraer solo el ID y nombre
+        const groupsList = Object.entries(groups).map(([id, group]) => {
+            return {
+                id: id.split('@')[0], // Eliminar el @g.us
+                name: group.subject,
+                creationTime: group.creation, // Timestamp para ordenación
+                created: new Date(group.creation * 1000).toLocaleDateString()
+            };
+        });
+        
+        // Ordenar por fecha de creación (de más reciente a más antiguo)
+        const sortedGroups = groupsList.sort((a, b) => b.creationTime - a.creationTime);
+        
+        res.status(200).json(sortedGroups);
+    } catch (error) {
+        console.error(`Error al obtener lista de grupos: ${error.message}`, error);
+        res.status(500).json({
+            status: 'error',
+            message: 'Failed to fetch groups list: ' + error.message
         });
     }
 };
@@ -527,5 +588,6 @@ module.exports = {
     generateQr,
     clearCache,
     getGroups,
+    getGroupsList,
     getStatus
 };

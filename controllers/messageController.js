@@ -27,9 +27,6 @@ async function startWhatsApp() {
             auth: state,
             printQRInTerminal: false, 
             version,
-            logger: {
-                level: 'error' // Establecer solo errores para no sobrecargar los logs
-            },
         });
 
         sock.ev.on('creds.update', (creds) => {

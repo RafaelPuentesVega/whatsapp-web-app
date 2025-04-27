@@ -199,6 +199,7 @@ const sendMessage = async (req, res) => {
     try {
         const { 
             recipientId, 
+            number,
             message, 
             imageUrl, 
             pdfUrl, 
@@ -207,10 +208,13 @@ const sendMessage = async (req, res) => {
             isGroup = false  // Valor por defecto: false (envío a usuario individual)
         } = req.body;
 
-        if (!recipientId) {
+        // Usar number si está presente, de lo contrario usar recipientId
+        const recipient = number || recipientId;
+
+        if (!recipient) {
             return res.status(400).json({
                 status: 'error',
-                message: 'Recipient ID is required'
+                message: 'Recipient ID or number is required'
             });
         }
 
@@ -223,7 +227,7 @@ const sendMessage = async (req, res) => {
                         message: 'Message is required'
                     });
                 }
-                response = await sendText(recipientId, message, isGroup);
+                response = await sendText(recipient, message, isGroup);
                 break;
 
             case "imagen":
@@ -233,7 +237,7 @@ const sendMessage = async (req, res) => {
                         message: 'Image URL is required'
                     });
                 }
-                response = await sendMedia(recipientId, imageUrl, message || '', isGroup);
+                response = await sendMedia(recipient, imageUrl, message || '', isGroup);
                 break;
                 
             case "pdf":
@@ -243,7 +247,7 @@ const sendMessage = async (req, res) => {
                         message: 'PDF URL is required'
                     });
                 }
-                response = await sendPDF(recipientId, pdfUrl, fileName || 'document', isGroup);
+                response = await sendPDF(recipient, pdfUrl, fileName || 'document', isGroup);
                 break;
         
             default:

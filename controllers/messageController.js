@@ -79,7 +79,10 @@ startWhatsApp();
 
 // Formatea el ID de destinatario según sea usuario o grupo
 const formatRecipientId = (id, isGroup = false) => {
-    const formatted = `${id}@${isGroup ? 'g.us' : 's.whatsapp.net'}`;
+    // Eliminar el signo + al principio si existe
+    const cleanId = id.toString().replace(/^\+/, '');
+    
+    const formatted = `${cleanId}@${isGroup ? 'g.us' : 's.whatsapp.net'}`;
     console.log(`ID formateado: ${id} -> ${formatted} (Es grupo: ${isGroup})`);
     return formatted;
 };
@@ -158,25 +161,40 @@ const sendText = async (recipientId, message, isGroup = false) => {
     console.log(`Enviando mensaje de texto a ${recipientId}${isGroup ? ' (grupo)' : ''}: "${message.substring(0, 30)}${message.length > 30 ? '...' : ''}"`);
     console.log(`Estado actual de conexión: ${connectionStatus}`);
     
-    try {
-        if (connectionStatus !== 'open') {
-            console.log('⚠️ Advertencia: Intentando enviar mensaje sin conexión activa');
+    const MAX_RETRIES = 2;
+    let retries = 0;
+    
+    while (retries <= MAX_RETRIES) {
+        try {
+            if (connectionStatus !== 'open') {
+                console.log('⚠️ Advertencia: Intentando enviar mensaje sin conexión activa');
+            }
+            
+            const formattedId = formatRecipientId(recipientId, isGroup);
+            console.log(`Enviando mensaje a: ${formattedId} (Intento ${retries + 1}/${MAX_RETRIES + 1})`);
+            
+            const response = await sock.sendMessage(formattedId, { text: message });
+            console.log('Mensaje enviado correctamente:', JSON.stringify(response, null, 2));
+            
+            return {
+                status: 'success',
+                message: `Message sent successfully to ${isGroup ? 'group' : 'user'}`,
+                response: response
+            };
+        } catch (err) {
+            retries++;
+            console.error(`Error al enviar mensaje (Intento ${retries}/${MAX_RETRIES + 1}): ${err.message}`, err);
+            
+            // Si es el último intento, lanzar el error
+            if (retries > MAX_RETRIES) {
+                console.error(`Fallo después de ${MAX_RETRIES + 1} intentos. Datos de la solicitud: recipientId=${recipientId}, isGroup=${isGroup}`);
+                throw new Error(`Failed to send message after ${MAX_RETRIES + 1} attempts: ${err.message}`);
+            }
+            
+            // Esperar antes de reintentar
+            console.log(`Esperando 1 segundo antes de reintentar...`);
+            await new Promise(resolve => setTimeout(resolve, 1000));
         }
-        
-        const formattedId = formatRecipientId(recipientId, isGroup);
-        console.log(`Enviando mensaje a: ${formattedId}`);
-        
-        const response = await sock.sendMessage(formattedId, { text: message });
-        console.log('Mensaje enviado correctamente:', JSON.stringify(response, null, 2));
-        
-        return {
-            status: 'success',
-            message: `Message sent successfully to ${isGroup ? 'group' : 'user'}`,
-            response: response
-        };
-    } catch (err) {
-        console.error(`Error al enviar mensaje: ${err.message}`, err);
-        throw new Error(`Failed to send message: ${err.message}`);
     }
 };
 
@@ -184,7 +202,9 @@ const sendText = async (recipientId, message, isGroup = false) => {
 const sendMedia = async (recipientId, imageUrl, caption = '', isGroup = false) => {
     console.log(`Enviando imagen a ${recipientId}${isGroup ? ' (grupo)' : ''} desde URL: ${imageUrl}`);
     const imagePath = path.resolve(__dirname, '..', 'temp', 'uploads.jpg');
-
+    const MAX_RETRIES = 2;
+    let retries = 0;
+    
     try {
         // Descargar la imagen desde la URL
         await downloadImage(imageUrl, imagePath);
@@ -193,22 +213,39 @@ const sendMedia = async (recipientId, imageUrl, caption = '', isGroup = false) =
         const imageBuffer = fs.readFileSync(imagePath);
         console.log(`Imagen cargada, tamaño: ${imageBuffer.length} bytes`);
         
-        // Enviar la imagen
-        const formattedId = formatRecipientId(recipientId, isGroup);
-        console.log(`Enviando imagen a: ${formattedId}`);
-        
-        const response = await sock.sendMessage(formattedId, {
-            image: imageBuffer,
-            caption: caption
-        });
-        
-        console.log('Imagen enviada correctamente');
+        while (retries <= MAX_RETRIES) {
+            try {
+                // Enviar la imagen
+                const formattedId = formatRecipientId(recipientId, isGroup);
+                console.log(`Enviando imagen a: ${formattedId} (Intento ${retries + 1}/${MAX_RETRIES + 1})`);
+                
+                const response = await sock.sendMessage(formattedId, {
+                    image: imageBuffer,
+                    caption: caption
+                });
+                
+                console.log('Imagen enviada correctamente');
 
-        return {
-            status: 'success',
-            message: `Image sent successfully to ${isGroup ? 'group' : 'user'}`,
-            response: response
-        };
+                return {
+                    status: 'success',
+                    message: `Image sent successfully to ${isGroup ? 'group' : 'user'}`,
+                    response: response
+                };
+            } catch (error) {
+                retries++;
+                console.error(`Error al enviar imagen (Intento ${retries}/${MAX_RETRIES + 1}): ${error.message}`, error);
+                
+                // Si es el último intento, lanzar el error
+                if (retries > MAX_RETRIES) {
+                    console.error(`Fallo después de ${MAX_RETRIES + 1} intentos. Datos de la solicitud: recipientId=${recipientId}, isGroup=${isGroup}`);
+                    throw new Error(`Failed to send image after ${MAX_RETRIES + 1} attempts: ${error.message}`);
+                }
+                
+                // Esperar antes de reintentar
+                console.log(`Esperando 1 segundo antes de reintentar...`);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
     } catch (error) {
         console.error(`Error al enviar imagen: ${error.message}`, error);
         throw new Error(`Failed to send image: ${error.message}`);
@@ -225,6 +262,8 @@ const sendMedia = async (recipientId, imageUrl, caption = '', isGroup = false) =
 const sendPDF = async (recipientId, pdfUrl, fileName, isGroup = false) => {
     console.log(`Enviando PDF a ${recipientId}${isGroup ? ' (grupo)' : ''} desde URL: ${pdfUrl}`);
     const pdfPath = path.resolve(__dirname, '..', 'temp', 'uploads.pdf');
+    const MAX_RETRIES = 2;
+    let retries = 0;
 
     try {
         // Descargar el PDF desde la URL
@@ -234,23 +273,40 @@ const sendPDF = async (recipientId, pdfUrl, fileName, isGroup = false) => {
         const pdfBuffer = fs.readFileSync(pdfPath);
         console.log(`PDF cargado, tamaño: ${pdfBuffer.length} bytes`);
         
-        // Enviar el PDF
-        const formattedId = formatRecipientId(recipientId, isGroup);
-        console.log(`Enviando PDF a: ${formattedId}`);
-        
-        const response = await sock.sendMessage(formattedId, {
-            document: pdfBuffer,
-            mimetype: 'application/pdf',
-            fileName: `${fileName}.pdf`
-        });
-        
-        console.log('PDF enviado correctamente');
+        while (retries <= MAX_RETRIES) {
+            try {
+                // Enviar el PDF
+                const formattedId = formatRecipientId(recipientId, isGroup);
+                console.log(`Enviando PDF a: ${formattedId} (Intento ${retries + 1}/${MAX_RETRIES + 1})`);
+                
+                const response = await sock.sendMessage(formattedId, {
+                    document: pdfBuffer,
+                    mimetype: 'application/pdf',
+                    fileName: `${fileName}.pdf`
+                });
+                
+                console.log('PDF enviado correctamente');
 
-        return {
-            status: 'success',
-            message: `PDF sent successfully to ${isGroup ? 'group' : 'user'}`,
-            response: response
-        };
+                return {
+                    status: 'success',
+                    message: `PDF sent successfully to ${isGroup ? 'group' : 'user'}`,
+                    response: response
+                };
+            } catch (error) {
+                retries++;
+                console.error(`Error al enviar PDF (Intento ${retries}/${MAX_RETRIES + 1}): ${error.message}`, error);
+                
+                // Si es el último intento, lanzar el error
+                if (retries > MAX_RETRIES) {
+                    console.error(`Fallo después de ${MAX_RETRIES + 1} intentos. Datos de la solicitud: recipientId=${recipientId}, isGroup=${isGroup}`);
+                    throw new Error(`Failed to send PDF after ${MAX_RETRIES + 1} attempts: ${error.message}`);
+                }
+                
+                // Esperar antes de reintentar
+                console.log(`Esperando 1 segundo antes de reintentar...`);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
     } catch (error) {
         console.error(`Error al enviar PDF: ${error.message}`, error);
         throw new Error(`Failed to send PDF: ${error.message}`);

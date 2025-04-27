@@ -39,6 +39,13 @@ async function startWhatsApp() {
 }
 
 startWhatsApp();
+
+// Formatea el ID de destinatario según sea usuario o grupo
+const formatRecipientId = (id, isGroup = false) => {
+    return `${id}@${isGroup ? 'g.us' : 's.whatsapp.net'}`;
+};
+
+// Función para generar QR
 const generateQr = async (req, res) => {
     const providedToken = req.query.token;
 
@@ -56,34 +63,7 @@ const generateQr = async (req, res) => {
     }
 };
 
-
-// Función para borrar la carpeta de caché
-const clearCache1 = async (req, res) => {
-    const cacheAuthPath = path.resolve(__dirname, '../.wwebjs_auth');
-    const cachePath = path.resolve(__dirname, '../.wwebjs_cache');
-    const providedToken = req.query.token; // Token pasado como parámetro en la URL
-
-    // Validar el token
-    if (!providedToken || providedToken !== securityToken) {
-        return res.status(403).send('Unauthorized: Invalid token');
-    }
-
-    // Eliminar la carpeta de caché
-    fs.rm(cachePath, { recursive: true, force: true }, (err) => {
-        if (err) {
-            return res.status(500).send('Error deleting cache: ' + err.message);
-        } else {
-            fs.rm(cacheAuthPath, { recursive: true, force: true }, (err) => {
-                if (err) {
-                    return res.status(500).send('Error deleting auth cache: ' + err.message);
-                } else {
-                    return res.status(200).send('Cache deleted successfully.');
-                }
-            });
-        }
-    });
-};
-
+// Descargar imagen desde URL
 const downloadImage = async (url, filename) => {
     const response = await axios({
         url,
@@ -92,53 +72,46 @@ const downloadImage = async (url, filename) => {
     fs.writeFileSync(filename, response.data);
 };
 
-const messageText = async (number, message, res) => {
+// Función unificada para enviar mensajes de texto
+const sendText = async (recipientId, message, isGroup = false) => {
     try {
-        const response = await sock.sendMessage(`${number}@s.whatsapp.net`, { text: message });
-        res.status(200).json({
+        const formattedId = formatRecipientId(recipientId, isGroup);
+        const response = await sock.sendMessage(formattedId, { text: message });
+        return {
             status: 'success',
-            message: 'Message sent successfully',
+            message: `Message sent successfully to ${isGroup ? 'group' : 'user'}`,
             response: response
-        });
+        };
     } catch (err) {
-        res.status(500).json({
-            status: 'error',
-            message: 'Failed to send message: ' + err.message
-        });
+        throw new Error(`Failed to send message: ${err.message}`);
     }
 };
 
-const messageMedia = async (number, imageUrl, message, res) => {
+// Función unificada para enviar medios (imágenes)
+const sendMedia = async (recipientId, imageUrl, caption = '', isGroup = false) => {
     const imagePath = path.resolve(__dirname, '..', 'temp', 'uploads.jpg');
 
     try {
-        let text = '';
-        if(message){
-            text = message;
-        }
         // Descargar la imagen desde la URL
         await downloadImage(imageUrl, imagePath);
 
-        // Leer la imagen desde el archivo y convertirla a base64
+        // Leer la imagen desde el archivo
         const imageBuffer = fs.readFileSync(imagePath);
-        const imageBase64 = imageBuffer.toString('base64');
-
-        // Enviar la imagen usando Baileys
-        const response = await sock.sendMessage(`${number}@s.whatsapp.net`, {
+        
+        // Enviar la imagen
+        const formattedId = formatRecipientId(recipientId, isGroup);
+        const response = await sock.sendMessage(formattedId, {
             image: imageBuffer,
-            caption: text // Texto opcional para acompañar la imagen
+            caption: caption
         });
 
-        res.status(200).json({
+        return {
             status: 'success',
-            message: 'Image sent successfully',
+            message: `Image sent successfully to ${isGroup ? 'group' : 'user'}`,
             response: response
-        });
+        };
     } catch (error) {
-        res.status(500).json({
-            status: 'error',
-            message: 'Failed to send image or download the image: ' + error.message
-        });
+        throw new Error(`Failed to send image: ${error.message}`);
     } finally {
         // Elimina la imagen temporal
         if (fs.existsSync(imagePath)) {
@@ -146,6 +119,64 @@ const messageMedia = async (number, imageUrl, message, res) => {
         }
     }
 };
+
+// Función unificada para enviar PDF
+const sendPDF = async (recipientId, pdfUrl, fileName, isGroup = false) => {
+    const pdfPath = path.resolve(__dirname, '..', 'temp', 'uploads.pdf');
+
+    try {
+        // Descargar el PDF desde la URL
+        await downloadImage(pdfUrl, pdfPath);
+
+        // Leer el PDF
+        const pdfBuffer = fs.readFileSync(pdfPath);
+        
+        // Enviar el PDF
+        const formattedId = formatRecipientId(recipientId, isGroup);
+        const response = await sock.sendMessage(formattedId, {
+            document: pdfBuffer,
+            mimetype: 'application/pdf',
+            fileName: `${fileName}.pdf`
+        });
+
+        return {
+            status: 'success',
+            message: `PDF sent successfully to ${isGroup ? 'group' : 'user'}`,
+            response: response
+        };
+    } catch (error) {
+        throw new Error(`Failed to send PDF: ${error.message}`);
+    } finally {
+        // Elimina el PDF temporal
+        if (fs.existsSync(pdfPath)) {
+            fs.unlinkSync(pdfPath);
+        }
+    }
+};
+
+// Función para obtener todos los grupos
+const getGroups = async (req, res) => {
+    try {
+        const providedToken = req.query.token;
+
+        if (!providedToken || providedToken !== process.env.SECURITY_TOKEN) {
+            return res.status(403).send('Unauthorized: Invalid token');
+        }
+        
+        const groups = await sock.groupFetchAllParticipating();
+        res.status(200).json({
+            status: 'success',
+            groups: groups
+        });
+    } catch (error) {
+        res.status(500).json({
+            status: 'error',
+            message: 'Failed to fetch groups: ' + error.message
+        });
+    }
+};
+
+// Función para limpiar caché
 const clearCache = async (req, res) => {
     const cacheAuthPath = path.resolve(__dirname, '../auth_info');
     const providedToken = req.query.token;
@@ -163,90 +194,78 @@ const clearCache = async (req, res) => {
     });
 };
 
-
-
-const sendPDF = async (number, pdfBase64, nameFile, res) => {
+// Función unificada para enviar mensajes - API endpoint
+const sendMessage = async (req, res) => {
     try {
-        const imagePath = path.resolve(__dirname, '..', 'temp', 'uploads.pdf');
+        const { 
+            recipientId, 
+            message, 
+            imageUrl, 
+            pdfUrl, 
+            type, 
+            fileName,
+            isGroup = false  // Valor por defecto: false (envío a usuario individual)
+        } = req.body;
 
-        // Convertir la cadena base64 de vuelta a un buffer
-        //const pdfBuffer = Buffer.from(pdfBase64, 'base64');
-        // Descargar la imagen desde la URL
-        await downloadImage(pdfBase64, imagePath);
+        if (!recipientId) {
+            return res.status(400).json({
+                status: 'error',
+                message: 'Recipient ID is required'
+            });
+        }
 
-        // Leer la imagen desde el archivo y convertirla a base64
-        const imageBuffer = fs.readFileSync(imagePath);
+        let response;
+        switch (type) {
+            case "texto":
+                if (!message) {
+                    return res.status(400).json({
+                        status: 'error',
+                        message: 'Message is required'
+                    });
+                }
+                response = await sendText(recipientId, message, isGroup);
+                break;
 
-        // Enviar el archivo PDF usando Baileys
-        const response = await sock.sendMessage(`${number}@s.whatsapp.net`, {
-            document: imageBuffer,
-            mimetype: 'application/pdf',
-            fileName: nameFile+'.pdf', // Nombre del archivo que el receptor verá
-        });
-
-        res.status(200).json({
-            status: 'success',
-            message: 'PDF sent successfully',
-            response: response
-        });
+            case "imagen":
+                if (!imageUrl) {
+                    return res.status(400).json({
+                        status: 'error',
+                        message: 'Image URL is required'
+                    });
+                }
+                response = await sendMedia(recipientId, imageUrl, message || '', isGroup);
+                break;
+                
+            case "pdf":
+                if (!pdfUrl) {
+                    return res.status(400).json({
+                        status: 'error',
+                        message: 'PDF URL is required'
+                    });
+                }
+                response = await sendPDF(recipientId, pdfUrl, fileName || 'document', isGroup);
+                break;
+        
+            default:
+                return res.status(400).json({
+                    status: 'error',
+                    message: 'Undefined type'
+                });
+        }
+        
+        res.status(200).json(response);
+        
     } catch (error) {
         res.status(500).json({
             status: 'error',
-            message: 'Failed to send PDF: ' + error.message
+            message: error.message
         });
-    }
-};
-
-const sendMessage = async (req, res) => {
-    const { number, message, imageUrl, pdfBase64, type , nameFile } = req.body;
-
-    if (!number) {
-        return res.status(400).json({
-            status: 'error',
-            message: 'Number is required'
-        });
-    }
-
-    switch (type) {
-        case "texto":
-            if (!message) {
-                return res.status(400).json({
-                    status: 'error',
-                    message: 'Message is required'
-                });
-            }
-            await messageText(number, message, res);
-            break;
-
-        case "imagen":
-            if (!imageUrl) {
-                return res.status(400).json({
-                    status: 'error',
-                    message: 'Image URL is required'
-                });
-            }
-            await messageMedia(number, imageUrl,message, res);
-            break;
-        case "pdf":
-            if (!pdfBase64) {
-                return res.status(400).json({
-                    status: 'error',
-                    message: 'pdf base64 is required'
-                });
-            }
-            await sendPDF(number, pdfBase64 ,nameFile, res);
-            break;
-    
-        default:
-            return res.status(400).json({
-                status: 'error',
-                message: 'Undefined type'
-            });
     }
 };
 
 module.exports = {
     sendMessage,
     generateQr,
-    clearCache
+    clearCache,
+    getGroups
 };

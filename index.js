@@ -1,7 +1,7 @@
 const express = require('express');
 require('dotenv').config();
 const authMiddleware = require('./middleware/auth');
-const { sendMessage, generateQr, clearCache, getGroups } = require('./controllers/messageController');
+const { sendMessage, generateQr, clearCache, getGroups, getStatus } = require('./controllers/messageController');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,6 +14,9 @@ app.post('/send-message', authMiddleware, sendMessage);
 
 // Ruta para obtener grupos
 app.get('/get-groups', authMiddleware, getGroups);
+
+// Ruta para verificar el estado de la conexión
+app.get('/status', authMiddleware, getStatus);
 
 app.get('/', generateQr);
 app.get('/clear-cache', clearCache);

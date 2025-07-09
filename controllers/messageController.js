@@ -1,90 +1,107 @@
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, downloadMediaMessage } = require('@whiskeysockets/baileys');
-const axios = require('axios');
+const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const fs = require('fs');
 const path = require('path');
-require('dotenv').config();
+const axios = require('axios');
 const qrcode = require('qrcode');
+require('dotenv').config();
 
-let qrCodeData = '';
 let sock;
+let qrCodeData = '';
 let connectionStatus = 'disconnected';
-let lastConnectionUpdate = null;
 
 async function startWhatsApp() {
-    console.log('Iniciando WhatsApp...');
     try {
         const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
-        const { version, isLatest } = await fetchLatestBaileysVersion();
-        
-        console.log(`Usando versión de Baileys: ${version}, es la última: ${isLatest}`);
-        console.log('Verificando archivos de autenticación...');
-        
-        // Verificar si hay archivos de autenticación
-        const authFiles = fs.readdirSync('./auth_info');
-        console.log(`Archivos de autenticación encontrados: ${authFiles.length > 0 ? authFiles.join(', ') : 'ninguno'}`);
-        
+        const { version } = await fetchLatestBaileysVersion();
+
         sock = makeWASocket({
             auth: state,
-            printQRInTerminal: false, 
             version,
+            printQRInTerminal: false
         });
 
-        sock.ev.on('creds.update', (creds) => {
-            console.log('Credenciales actualizadas');
-            saveCreds();
-        });
+        sock.ev.on('creds.update', saveCreds);
 
-        sock.ev.on('connection.update', (update) => {
-            console.log('Actualización de conexión:', JSON.stringify(update, null, 2));
-            const { connection, qr, lastDisconnect } = update;
-            lastConnectionUpdate = new Date().toISOString();
-            
-            if (connection) {
-                connectionStatus = connection;
-                console.log(`Estado de conexión: ${connection}`);
-            }
-            
-            if (connection === 'close') {
-                const statusCode = lastDisconnect?.error?.output?.statusCode;
-                const reason = lastDisconnect?.error?.message || 'Unknown';
-                console.log(`Conexión cerrada. Código: ${statusCode}, Razón: ${reason}`);
-                
-                if (statusCode === 401) {
-                    console.log('Sesión expirada o inválida. Puedes tener que escanear el código QR nuevamente.');
-                }
-                
-                if (statusCode !== 403) {
-                    console.log('Intentando reconexión...');
-                    startWhatsApp(); 
-                }
-            } else if (connection === 'open') {
-                console.log('Cliente conectado y listo!');
+        sock.ev.on('connection.update', ({ connection, qr, lastDisconnect }) => {
+            connectionStatus = connection;
+            if (qr) qrCodeData = qr;
+
+            if (connection === 'close' && lastDisconnect?.error?.output?.statusCode !== 403) {
+                console.log('Reconectando...');
+                setTimeout(startWhatsApp, 3000);
             }
 
-            if (qr) {
-                console.log('Nuevo código QR generado');
-                qrCodeData = qr;
+            if (connection === 'open') {
+                console.log('✅ WhatsApp conectado y listo.');
             }
-        });
-
-        sock.ev.on('messages.upsert', async (message) => {
-            console.log('Mensaje recibido:', JSON.stringify(message.messages[0]?.key || 'No key', null, 2));
         });
     } catch (error) {
-        console.error('Error al iniciar WhatsApp:', error);
+        console.error('❌ Error al iniciar WhatsApp:', error);
     }
 }
 
 startWhatsApp();
 
-// Formatea el ID de destinatario según sea usuario o grupo
-const formatRecipientId = (id, isGroup = false) => {
-    // Eliminar el signo + al principio si existe
-    const cleanId = id.toString().replace(/^\+/, '');
-    
-    const formatted = `${cleanId}@${isGroup ? 'g.us' : 's.whatsapp.net'}`;
-    console.log(`ID formateado: ${id} -> ${formatted} (Es grupo: ${isGroup})`);
-    return formatted;
+const formatId = (id, isGroup = false) =>
+    `${id.toString().replace(/^\+/, '')}@${isGroup ? 'g.us' : 's.whatsapp.net'}`;
+
+const downloadFile = async (url, filename) => {
+    const response = await axios({ url, responseType: 'arraybuffer' });
+    fs.writeFileSync(filename, response.data);
+};
+
+// Enviar mensaje de texto
+const sendText = async (req, res) => {
+    try {
+        const { number, message, isGroup = false } = req.body;
+        if (!number || !message) return res.status(400).json({ error: 'Número y mensaje son obligatorios' });
+
+        const jid = formatId(number, isGroup);
+        const response = await sock.sendMessage(jid, { text: message });
+        res.json({ status: 'success', response });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+};
+
+// Enviar imagen
+const sendImage = async (req, res) => {
+    const { number, imageUrl, caption = '', isGroup = false } = req.body;
+    const tempPath = path.join(__dirname, '..', 'temp', 'img.jpg');
+
+    try {
+        await downloadFile(imageUrl, tempPath);
+        const buffer = fs.readFileSync(tempPath);
+        const jid = formatId(number, isGroup);
+        const response = await sock.sendMessage(jid, { image: buffer, caption });
+        res.json({ status: 'success', response });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    } finally {
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    }
+};
+
+// Enviar PDF
+const sendPDF = async (req, res) => {
+    const { number, pdfUrl, fileName = 'document', isGroup = false } = req.body;
+    const tempPath = path.join(__dirname, '..', 'temp', 'doc.pdf');
+
+    try {
+        await downloadFile(pdfUrl, tempPath);
+        const buffer = fs.readFileSync(tempPath);
+        const jid = formatId(number, isGroup);
+        const response = await sock.sendMessage(jid, {
+            document: buffer,
+            mimetype: 'application/pdf',
+            fileName: `${fileName}.pdf`
+        });
+        res.json({ status: 'success', response });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    } finally {
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    }
 };
 
 // Función para generar QR
@@ -113,7 +130,6 @@ const generateQr = async (req, res) => {
                 <body>
                     <h1>WhatsApp Web QR Code</h1>
                     <p>Estado de conexión: ${connectionStatus}</p>
-                    <p>Última actualización: ${lastConnectionUpdate || 'N/A'}</p>
                     <img src="${src}">
                     <p>Esta página se actualizará automáticamente cada 30 segundos</p>
                 </body>
@@ -131,455 +147,101 @@ const generateQr = async (req, res) => {
             <body>
                 <h1>WhatsApp Web QR Code</h1>
                 <p>Estado de conexión: ${connectionStatus}</p>
-                <p>Última actualización: ${lastConnectionUpdate || 'N/A'}</p>
                 <p>El código QR no está disponible todavía, esta página se actualizará automáticamente...</p>
             </body>
             </html>
         `);
     }
 };
-
-// Descargar imagen desde URL
-const downloadImage = async (url, filename) => {
-    console.log(`Descargando archivo desde: ${url} a ${filename}`);
-    try {
-        const response = await axios({
-            url,
-            responseType: 'arraybuffer'
-        });
-        fs.writeFileSync(filename, response.data);
-        console.log('Archivo descargado correctamente');
-        return true;
-    } catch (error) {
-        console.error(`Error al descargar archivo: ${error.message}`);
-        throw error;
+// Estado de conexión
+const getStatus = (req, res) => {
+    if (req.query.token !== process.env.SECURITY_TOKEN) {
+        return res.status(403).send('Token inválido');
     }
+
+    res.json({
+        status: connectionStatus,
+        qrAvailable: !!qrCodeData
+    });
 };
 
-// Función unificada para enviar mensajes de texto
-const sendText = async (recipientId, message, isGroup = false) => {
-    console.log(`Enviando mensaje de texto a ${recipientId}${isGroup ? ' (grupo)' : ''}: "${message.substring(0, 30)}${message.length > 30 ? '...' : ''}"`);
-    console.log(`Estado actual de conexión: ${connectionStatus}`);
-    
-    const MAX_RETRIES = 2;
-    let retries = 0;
-    
-    while (retries <= MAX_RETRIES) {
-        try {
-            if (connectionStatus !== 'open') {
-                console.log('⚠️ Advertencia: Intentando enviar mensaje sin conexión activa');
-            }
-            
-            const formattedId = formatRecipientId(recipientId, isGroup);
-            console.log(`Enviando mensaje a: ${formattedId} (Intento ${retries + 1}/${MAX_RETRIES + 1})`);
-            
-            const response = await sock.sendMessage(formattedId, { text: message });
-            console.log('Mensaje enviado correctamente:', JSON.stringify(response, null, 2));
-            
-            return {
-                status: 'success',
-                message: `Message sent successfully to ${isGroup ? 'group' : 'user'}`,
-                response: response
-            };
-        } catch (err) {
-            retries++;
-            console.error(`Error al enviar mensaje (Intento ${retries}/${MAX_RETRIES + 1}): ${err.message}`, err);
-            
-            // Si es el último intento, lanzar el error
-            if (retries > MAX_RETRIES) {
-                console.error(`Fallo después de ${MAX_RETRIES + 1} intentos. Datos de la solicitud: recipientId=${recipientId}, isGroup=${isGroup}`);
-                throw new Error(`Failed to send message after ${MAX_RETRIES + 1} attempts: ${err.message}`);
-            }
-            
-            // Esperar antes de reintentar
-            console.log(`Esperando 1 segundo antes de reintentar...`);
-            await new Promise(resolve => setTimeout(resolve, 1000));
-        }
+// Limpiar caché
+const clearCache = (req, res) => {
+    if (req.query.token !== process.env.SECURITY_TOKEN) {
+        return res.status(403).send('Token inválido');
     }
-};
 
-// Función unificada para enviar medios (imágenes)
-const sendMedia = async (recipientId, imageUrl, caption = '', isGroup = false) => {
-    console.log(`Enviando imagen a ${recipientId}${isGroup ? ' (grupo)' : ''} desde URL: ${imageUrl}`);
-    const imagePath = path.resolve(__dirname, '..', 'temp', 'uploads.jpg');
-    const MAX_RETRIES = 2;
-    let retries = 0;
-    
+    const authPath = path.resolve(__dirname, '../auth_info');
     try {
-        // Descargar la imagen desde la URL
-        await downloadImage(imageUrl, imagePath);
-
-        // Leer la imagen desde el archivo
-        const imageBuffer = fs.readFileSync(imagePath);
-        console.log(`Imagen cargada, tamaño: ${imageBuffer.length} bytes`);
-        
-        while (retries <= MAX_RETRIES) {
-            try {
-                // Enviar la imagen
-                const formattedId = formatRecipientId(recipientId, isGroup);
-                console.log(`Enviando imagen a: ${formattedId} (Intento ${retries + 1}/${MAX_RETRIES + 1})`);
-                
-                const response = await sock.sendMessage(formattedId, {
-                    image: imageBuffer,
-                    caption: caption
-                });
-                
-                console.log('Imagen enviada correctamente');
-
-                return {
-                    status: 'success',
-                    message: `Image sent successfully to ${isGroup ? 'group' : 'user'}`,
-                    response: response
-                };
-            } catch (error) {
-                retries++;
-                console.error(`Error al enviar imagen (Intento ${retries}/${MAX_RETRIES + 1}): ${error.message}`, error);
-                
-                // Si es el último intento, lanzar el error
-                if (retries > MAX_RETRIES) {
-                    console.error(`Fallo después de ${MAX_RETRIES + 1} intentos. Datos de la solicitud: recipientId=${recipientId}, isGroup=${isGroup}`);
-                    throw new Error(`Failed to send image after ${MAX_RETRIES + 1} attempts: ${error.message}`);
-                }
-                
-                // Esperar antes de reintentar
-                console.log(`Esperando 1 segundo antes de reintentar...`);
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            }
-        }
-    } catch (error) {
-        console.error(`Error al enviar imagen: ${error.message}`, error);
-        throw new Error(`Failed to send image: ${error.message}`);
-    } finally {
-        // Elimina la imagen temporal
-        if (fs.existsSync(imagePath)) {
-            fs.unlinkSync(imagePath);
-            console.log('Archivo temporal de imagen eliminado');
-        }
-    }
-};
-
-// Función unificada para enviar PDF
-const sendPDF = async (recipientId, pdfUrl, fileName, isGroup = false) => {
-    console.log(`Enviando PDF a ${recipientId}${isGroup ? ' (grupo)' : ''} desde URL: ${pdfUrl}`);
-    const pdfPath = path.resolve(__dirname, '..', 'temp', 'uploads.pdf');
-    const MAX_RETRIES = 2;
-    let retries = 0;
-
-    try {
-        // Descargar el PDF desde la URL
-        await downloadImage(pdfUrl, pdfPath);
-
-        // Leer el PDF
-        const pdfBuffer = fs.readFileSync(pdfPath);
-        console.log(`PDF cargado, tamaño: ${pdfBuffer.length} bytes`);
-        
-        while (retries <= MAX_RETRIES) {
-            try {
-                // Enviar el PDF
-                const formattedId = formatRecipientId(recipientId, isGroup);
-                console.log(`Enviando PDF a: ${formattedId} (Intento ${retries + 1}/${MAX_RETRIES + 1})`);
-                
-                const response = await sock.sendMessage(formattedId, {
-                    document: pdfBuffer,
-                    mimetype: 'application/pdf',
-                    fileName: `${fileName}.pdf`
-                });
-                
-                console.log('PDF enviado correctamente');
-
-                return {
-                    status: 'success',
-                    message: `PDF sent successfully to ${isGroup ? 'group' : 'user'}`,
-                    response: response
-                };
-            } catch (error) {
-                retries++;
-                console.error(`Error al enviar PDF (Intento ${retries}/${MAX_RETRIES + 1}): ${error.message}`, error);
-                
-                // Si es el último intento, lanzar el error
-                if (retries > MAX_RETRIES) {
-                    console.error(`Fallo después de ${MAX_RETRIES + 1} intentos. Datos de la solicitud: recipientId=${recipientId}, isGroup=${isGroup}`);
-                    throw new Error(`Failed to send PDF after ${MAX_RETRIES + 1} attempts: ${error.message}`);
-                }
-                
-                // Esperar antes de reintentar
-                console.log(`Esperando 1 segundo antes de reintentar...`);
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            }
-        }
-    } catch (error) {
-        console.error(`Error al enviar PDF: ${error.message}`, error);
-        throw new Error(`Failed to send PDF: ${error.message}`);
-    } finally {
-        // Elimina el PDF temporal
-        if (fs.existsSync(pdfPath)) {
-            fs.unlinkSync(pdfPath);
-            console.log('Archivo temporal de PDF eliminado');
-        }
-    }
-};
-
-// Función para obtener todos los grupos
-const getGroups = async (req, res) => {
-    console.log('Solicitando lista de grupos');
-    try {
-        const providedToken = req.query.token || req.headers.authorization?.split(' ')[1];
-
-        if (!providedToken || providedToken !== process.env.SECURITY_TOKEN) {
-            console.log('Intento de acceso no autorizado a la lista de grupos');
-            return res.status(403).send('Unauthorized: Invalid token');
-        }
-        
-        if (connectionStatus !== 'open') {
-            console.log('⚠️ Advertencia: Intentando obtener grupos sin conexión activa');
-            return res.status(500).json({
-                status: 'error',
-                message: `Not connected. Current status: ${connectionStatus}`
-            });
-        }
-        
-        console.log('Obteniendo grupos...');
-        const groups = await sock.groupFetchAllParticipating();
-        console.log(`Se encontraron ${Object.keys(groups).length} grupos`);
-        
-        // Procesamos los grupos para extraer solo la información relevante
-        const simplifiedGroups = Object.entries(groups).map(([id, group]) => {
-            return {
-                id: id.split('@')[0], // Eliminar el @g.us
-                name: group.subject,
-                creationTime: group.creation, // Timestamp de creación
-                creationDate: new Date(group.creation * 1000).toISOString(), // Fecha en formato legible
-                participantsCount: group.participants?.length || 0
-            };
-        });
-        
-        // Ordenar por fecha de creación (de más reciente a más antiguo)
-        const sortedGroups = simplifiedGroups.sort((a, b) => b.creationTime - a.creationTime);
-        
-        res.status(200).json({
-            status: 'success',
-            connection: connectionStatus,
-            lastUpdate: lastConnectionUpdate,
-            count: sortedGroups.length,
-            groups: sortedGroups
-        });
-    } catch (error) {
-        console.error(`Error al obtener grupos: ${error.message}`, error);
-        res.status(500).json({
-            status: 'error',
-            message: 'Failed to fetch groups: ' + error.message
-        });
-    }
-};
-
-// Función para obtener una lista simplificada de grupos
-const getGroupsList = async (req, res) => {
-    console.log('Solicitando lista simplificada de grupos');
-    try {
-        const providedToken = req.query.token || req.headers.authorization?.split(' ')[1];
-
-        if (!providedToken || providedToken !== process.env.SECURITY_TOKEN) {
-            console.log('Intento de acceso no autorizado a la lista simplificada de grupos');
-            return res.status(403).send('Unauthorized: Invalid token');
-        }
-        
-        if (connectionStatus !== 'open') {
-            console.log('⚠️ Advertencia: Intentando obtener grupos sin conexión activa');
-            return res.status(500).json({
-                status: 'error',
-                message: `Not connected. Current status: ${connectionStatus}`
-            });
-        }
-        
-        console.log('Obteniendo lista de grupos...');
-        const groups = await sock.groupFetchAllParticipating();
-        console.log(`Se encontraron ${Object.keys(groups).length} grupos`);
-        
-        // Procesamos los grupos para extraer solo el ID y nombre
-        const groupsList = Object.entries(groups).map(([id, group]) => {
-            return {
-                id: id.split('@')[0], // Eliminar el @g.us
-                name: group.subject,
-                creationTime: group.creation, // Timestamp para ordenación
-                created: new Date(group.creation * 1000).toLocaleDateString()
-            };
-        });
-        
-        // Ordenar por fecha de creación (de más reciente a más antiguo)
-        const sortedGroups = groupsList.sort((a, b) => b.creationTime - a.creationTime);
-        
-        res.status(200).json(sortedGroups);
-    } catch (error) {
-        console.error(`Error al obtener lista de grupos: ${error.message}`, error);
-        res.status(500).json({
-            status: 'error',
-            message: 'Failed to fetch groups list: ' + error.message
-        });
-    }
-};
-
-// Función para obtener estado de conexión
-const getStatus = async (req, res) => {
-    console.log('Solicitando estado de conexión');
-    try {
-        const providedToken = req.query.token;
-
-        if (!providedToken || providedToken !== process.env.SECURITY_TOKEN) {
-            console.log('Intento de acceso no autorizado al estado');
-            return res.status(403).send('Unauthorized: Invalid token');
-        }
-        
-        // Comprobar si hay archivos de autenticación
-        let authExists = false;
-        try {
-            const authFiles = fs.readdirSync('./auth_info');
-            authExists = authFiles.length > 0;
-        } catch (err) {
-            authExists = false;
-        }
-        
-        res.status(200).json({
-            status: 'success',
-            connection: connectionStatus,
-            lastUpdate: lastConnectionUpdate,
-            authenticationExists: authExists,
-            qrAvailable: !!qrCodeData
-        });
-    } catch (error) {
-        console.error(`Error al obtener estado: ${error.message}`);
-        res.status(500).json({
-            status: 'error',
-            message: 'Failed to get status: ' + error.message
-        });
-    }
-};
-
-// Función para limpiar caché
-const clearCache = async (req, res) => {
-    console.log('Solicitud para limpiar caché recibida');
-    const cacheAuthPath = path.resolve(__dirname, '../auth_info');
-    const providedToken = req.query.token;
-
-    if (!providedToken || providedToken !== process.env.SECURITY_TOKEN) {
-        console.log('Intento de acceso no autorizado para limpiar caché');
-        return res.status(403).send('Unauthorized: Invalid token');
-    }
-
-    try {
-        if (fs.existsSync(cacheAuthPath)) {
-            console.log(`Eliminando directorio de caché: ${cacheAuthPath}`);
-            fs.rmSync(cacheAuthPath, { recursive: true, force: true });
-            console.log('Caché eliminado correctamente');
-            
-            // Reiniciar WhatsApp
-            console.log('Reiniciando WhatsApp después de limpiar caché');
+        if (fs.existsSync(authPath)) {
+            fs.rmSync(authPath, { recursive: true, force: true });
             qrCodeData = '';
             connectionStatus = 'disconnected';
-            setTimeout(() => {
-                startWhatsApp();
-            }, 1000);
-            
-            return res.status(200).send('Cache deleted successfully. Restarting WhatsApp...');
+            console.log('✅ Caché eliminado. Reiniciando...');
+            setTimeout(startWhatsApp, 2000);
+            return res.send('Caché eliminado. Reiniciando conexión...');
         } else {
-            console.log('El directorio de caché no existe');
-            return res.status(200).send('Cache directory does not exist.');
+            return res.send('No se encontró carpeta de autenticación.');
         }
     } catch (err) {
-        console.error(`Error al eliminar caché: ${err.message}`, err);
-        return res.status(500).send('Error deleting cache: ' + err.message);
+        return res.status(500).send('Error al eliminar la caché: ' + err.message);
     }
 };
 
-// Función unificada para enviar mensajes - API endpoint
-const sendMessage = async (req, res) => {
-    console.log('Solicitud para enviar mensaje recibida:', JSON.stringify(req.body, null, 2));
+// Obtener todos los grupos
+const getGroups = async (req, res) => {
+    if (req.query.token !== process.env.SECURITY_TOKEN) {
+        return res.status(403).send('Token inválido');
+    }
+
     try {
-        const { 
-            recipientId, 
-            number,
-            message, 
-            imageUrl, 
-            pdfUrl, 
-            type, 
-            fileName,
-            isGroup = false  // Valor por defecto: false (envío a usuario individual)
-        } = req.body;
+        const groups = await sock.groupFetchAllParticipating();
+        const result = Object.entries(groups).map(([id, group]) => ({
+            id: id.split('@')[0],
+            name: group.subject,
+            participants: group.participants.length
+        }));
 
-        // Usar number si está presente, de lo contrario usar recipientId
-        const recipient = number || recipientId;
+        res.json({ count: result.length, groups: result });
+    } catch (err) {
+        res.status(500).json({ error: 'Error al obtener los grupos' });
+    }
+};
 
-        if (!recipient) {
-            console.log('Error: Falta el destinatario (recipientId o number)');
-            return res.status(400).json({
-                status: 'error',
-                message: 'Recipient ID or number is required'
-            });
-        }
+// Obtener lista simplificada de grupos
+const getGroupsList = async (req, res) => {
+    if (req.query.token !== process.env.SECURITY_TOKEN) {
+        return res.status(403).send('Token inválido');
+    }
 
-        // Verificar estado de conexión
-        if (connectionStatus !== 'open') {
-            console.log(`⚠️ Advertencia: Intentando enviar mensaje sin conexión activa. Estado actual: ${connectionStatus}`);
-            return res.status(503).json({
-                status: 'error',
-                message: `WhatsApp not connected. Current status: ${connectionStatus}`,
-                lastUpdate: lastConnectionUpdate
-            });
-        }
+    try {
+        const groups = await sock.groupFetchAllParticipating();
+        const list = Object.entries(groups).map(([id, group]) => ({
+            id: id.split('@')[0],
+            name: group.subject
+        }));
 
-        let response;
-        switch (type) {
-            case "texto":
-                if (!message) {
-                    console.log('Error: Falta el mensaje');
-                    return res.status(400).json({
-                        status: 'error',
-                        message: 'Message is required'
-                    });
-                }
-                response = await sendText(recipient, message, isGroup);
-                break;
+        res.json(list);
+    } catch (err) {
+        res.status(500).json({ error: 'Error al obtener la lista de grupos' });
+    }
+};
 
-            case "imagen":
-                if (!imageUrl) {
-                    console.log('Error: Falta la URL de la imagen');
-                    return res.status(400).json({
-                        status: 'error',
-                        message: 'Image URL is required'
-                    });
-                }
-                response = await sendMedia(recipient, imageUrl, message || '', isGroup);
-                break;
-                
-            case "pdf":
-                if (!pdfUrl) {
-                    console.log('Error: Falta la URL del PDF');
-                    return res.status(400).json({
-                        status: 'error',
-                        message: 'PDF URL is required'
-                    });
-                }
-                response = await sendPDF(recipient, pdfUrl, fileName || 'document', isGroup);
-                break;
-        
-            default:
-                console.log(`Error: Tipo indefinido: ${type}`);
-                return res.status(400).json({
-                    status: 'error',
-                    message: 'Undefined type'
-                });
-        }
-        
-        console.log('Mensaje enviado correctamente');
-        res.status(200).json(response);
-        
-    } catch (error) {
-        console.error(`Error al procesar solicitud de mensaje: ${error.message}`);
-        res.status(500).json({
-            status: 'error',
-            message: error.message,
-            connectionStatus: connectionStatus,
-            lastUpdate: lastConnectionUpdate
-        });
+// Router principal
+const sendMessage = async (req, res) => {
+    const { type, number, message, imageUrl, pdfUrl, fileName, isGroup = false } = req.body;
+
+    if (!number) return res.status(400).json({ error: 'Número requerido' });
+
+    switch (type) {
+        case 'texto':
+            return sendText(req, res);
+        case 'imagen':
+            return sendImage(req, res);
+        case 'pdf':
+            return sendPDF(req, res);
+        default:
+            return res.status(400).json({ error: 'Tipo de mensaje no válido' });
     }
 };
 

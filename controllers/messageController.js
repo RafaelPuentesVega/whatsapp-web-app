@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const qrcode = require('qrcode');
+const { pdfToPng } = require('pdf-to-png-converter');
 require('dotenv').config();
 
 let sock;
@@ -101,6 +102,38 @@ const sendPDF = async (req, res) => {
         res.status(500).json({ status: 'error', message: err.message });
     } finally {
         if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    }
+};
+
+// Enviar PDF como imagen (convierte cada página a PNG)
+const sendPDFAsImage = async (req, res) => {
+    const { number, pdfUrl, fileName = 'document', isGroup = false } = req.body;
+    const tempPdfPath = path.join(__dirname, '..', 'temp', `${Date.now()}_doc.pdf`);
+
+    try {
+        await downloadFile(pdfUrl, tempPdfPath);
+
+        const pages = await pdfToPng(tempPdfPath, {
+            disableFontFace: false,
+            useSystemFonts: false,
+            viewportScale: 2.0,
+        });
+
+        const jid = formatId(number, isGroup);
+
+        for (let i = 0; i < pages.length; i++) {
+            await sock.sendMessage(jid, {
+                image: pages[i].content,
+                caption: i === 0 ? (fileName || '') : ''
+            });
+        }
+
+        res.json({ status: 'success', pages: pages.length });
+    } catch (err) {
+        console.error('Error en sendPDFAsImage:', err.message);
+        res.status(500).json({ status: 'error', message: err.message });
+    } finally {
+        if (fs.existsSync(tempPdfPath)) fs.unlinkSync(tempPdfPath);
     }
 };
 
@@ -240,6 +273,8 @@ const sendMessage = async (req, res) => {
             return sendImage(req, res);
         case 'pdf':
             return sendPDF(req, res);
+        case 'pdfAsImage':
+            return sendPDFAsImage(req, res);
         default:
             return res.status(400).json({ error: 'Tipo de mensaje no válido' });
     }
